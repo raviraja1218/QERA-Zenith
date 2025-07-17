@@ -30,7 +30,7 @@ class LogicalQubitSimulator:
         self.current_state = None 
 
         # Set up the Aer simulator instance
-        self.simulator = AerSimulator(method='density_matrix')
+        self.simulator = AerSimulator(method='density_matrix') # Ensure density_matrix method is used
         if self.qiskit_noise_model:
             self.simulator.set_options(noise_model=self.qiskit_noise_model)
 
@@ -69,8 +69,6 @@ class LogicalQubitSimulator:
             # Ensure enough classical bits are allocated in the circuit
             if classical_bit_idx >= self.current_qiskit_circuit.num_clbits:
                 # Add a ClassicalRegister if current_qiskit_circuit doesn't have enough clbits
-                # Use a new ClassicalRegister for each unique classical_bit_idx if dynamic.
-                # For simplicity, create a register big enough:
                 self.current_qiskit_circuit.add_register(QuantumCircuit.ClassicalRegister(max(1, classical_bit_idx + 1)))
             
         self.current_qiskit_circuit.measure(qubit_idx, classical_bit_idx)
@@ -116,12 +114,21 @@ class LogicalQubitSimulator:
         job = self.simulator.run(transpiled_qc, **run_options)
         result = job.result()
         
-        # Get the final density matrix from Qiskit Aer result
-        final_qiskit_dm = result.data()['density_matrix']
+        # --- CRITICAL FIX FOR KeyError: 'density_matrix' ---
+        final_qiskit_dm = None
+        if 'density_matrix' in result.data():
+            final_qiskit_dm = result.data()['density_matrix']
+        elif 'statevector' in result.data():
+            # If it's a statevector, convert it to a density matrix (|psi><psi|)
+            sv = result.get_statevector() # Get the Statevector object from result
+            final_qiskit_dm = np.outer(sv, sv.conj())
+        else:
+            raise KeyError("Neither 'density_matrix' nor 'statevector' found in Qiskit Aer result.data(). This might happen if simulation failed or result format changed.")
+        # --- END FIX ---
         
         # Convert back to your internal QuantumState object
-        self.current_state = QuantumState(self.num_qubits) # Create new QuantumState object
-        self.current_state.set_density_matrix(final_qiskit_dm) # Set its density matrix
+        self.current_state = QuantumState(self.num_qubits)
+        self.current_state.set_density_matrix(final_qiskit_dm)
 
         return self.current_state
 
