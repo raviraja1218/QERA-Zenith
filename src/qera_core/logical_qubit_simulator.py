@@ -68,7 +68,6 @@ class LogicalQubitSimulator:
 
         run_options = {'shots': 1} 
         
-        # Determine the effective initial state for debugging and fallback
         effective_initial_dm = None
         if initial_state_dm is not None:
             effective_initial_dm = initial_state_dm
@@ -91,10 +90,10 @@ class LogicalQubitSimulator:
         job = self.simulator.run(transpiled_qc, **run_options)
         result = job.result()
         
-        # --- ULTIMATE ROBUST FIX FOR QISKIT AER RESULT EXTRACTION (FINAL FINAL VERSION!) ---
+        # --- ULTIMATE ROBUST FIX FOR QISKIT AER RESULT EXTRACTION (FINAL FINAL FINAL VERSION!) ---
         final_qiskit_dm = None
         
-        print(f"DEBUG: Qiskit Aer job.result().data() contains keys: {list(result.data().keys())}") 
+        print(f"DEBUG: Qiskit Aer job.result().data() contains keys: {list(result.data().keys())}") # DEBUG PRINT
         
         try:
             # Priority 1: Try to get density matrix directly via attribute and call
@@ -102,21 +101,23 @@ class LogicalQubitSimulator:
                 final_qiskit_dm = result.get_density_matrix() 
                 print("DEBUG: Successfully retrieved density matrix using result.get_density_matrix().")
             else:
-                # This will go to the next except block
+                # If method doesn't exist, it means the result object is too simple.
+                # Skip to trying statevector, and if that fails, then the fallback.
                 raise AttributeError("Attribute get_density_matrix is not defined or not callable.") 
         except AttributeError as e_dm_attr: # Catch AttributeError specifically for get_density_matrix
             print(f"DEBUG: result.get_density_matrix() failed ({e_dm_attr}). Trying result.get_statevector().")
             try:
                 # Priority 2: Try to get statevector via attribute and call
                 if hasattr(result, 'get_statevector') and callable(result.get_statevector):
-                    sv = result.get_statevector()
-                    final_qiskit_dm = np.outer(sv, sv.conj())
+                    final_qiskit_dm = result.get_statevector() # Get Statevector object
+                    final_qiskit_dm = np.outer(final_qiskit_dm, final_qiskit_dm.conj()) # Convert to DM
                     print("DEBUG: Successfully retrieved statevector and converted to density matrix.")
                 else:
-                    # This will go to the final fallback block
-                    raise AttributeError("Attribute get_statevector is not defined or not callable.")
-            except AttributeError as e_sv_attr: # Catch AttributeError for statevector
-                print(f"DEBUG: result.get_statevector() failed ({e_sv_attr}). Checking if circuit was empty or had no operations.")
+                    # If method doesn't exist, it means the result object is too simple.
+                    # Skip to the final fallback logic.
+                    raise AttributeError("Attribute get_statevector is not defined or not callable.") 
+            except (AttributeError, KeyError, QiskitError) as e_sv_fail: # <--- CRUCIAL CHANGE: Catch QiskitError and KeyError here
+                print(f"DEBUG: result.get_statevector() failed ({e_sv_fail}). Checking if circuit was empty or had no operations.")
                 # Priority 3: Fallback if circuit had no operations (like in env.reset() or just initial state setup)
                 # If the Qiskit circuit built (qc_to_run) has NO actual operations/instructions in its data list.
                 if not qc_to_run.data: 
@@ -126,7 +127,7 @@ class LogicalQubitSimulator:
                     # If it had operations but still no state data, then a genuine simulation problem.
                     raise KeyError(
                         f"Neither valid density matrix nor statevector found in Qiskit Aer result for non-empty circuit. "
-                        f"Last attempts errors: DM attr ({e_dm_attr}), SV attr ({e_sv_attr}). "
+                        f"Last attempts errors: DM attr ({e_dm_attr}), SV fail ({e_sv_fail}). "
                         f"This might indicate simulation failure or unexpected result format."
                     )
         # --- END FIX ---
@@ -151,7 +152,9 @@ class LogicalQubitSimulator:
 
         job = self.simulator.run(transpiled_meas_qc, shots=num_shots, initial_state=self.current_state.get_density_matrix())
         result = job.result()
-        counts = result.get_counts(transpiled_qc) # Note: use transpiled_qc for counts, not meas_qc directly
+        # Ensure counts are retrieved from the correct transpiled_meas_qc experiment
+        # The line `counts = result.get_counts(transpiled_qc)` in the original was an error.
+        counts = result.get_counts(transpiled_meas_qc) # Fix: use transpiled_meas_qc
         return counts
 
 # Example usage (for internal testing/understanding - will be in notebooks)
