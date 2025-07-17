@@ -18,14 +18,14 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 # Import core modules from src/qera_core
-# Note: input_encoders is specifically needed here for its static methods
+# Note: No need to import NoiseEncoder, QECCodeEncoder, CircuitEncoder here directly
+# as their static preprocess methods are now called via UESModel itself.
 from qera_core.rl_agent.environment_wrapper import QECEnvironment
 from qera_core.rl_agent.agent_logic import UES_RL_Agent
 from qera_core.ues_model.transformer_gnn_core import UESModel
-from qera_core.ues_model.input_encoders import NoiseEncoder, QECCodeEncoder, CircuitEncoder # Import encoders to access static preprocess methods
 from qera_core.utils.logging_utils import setup_tensorboard_logger, log_episode_metrics
 
-# --- REMOVED: The _preprocess_raw_circuit_ops function from here. It's now in input_encoders.py ---
+# --- REMOVED: The _preprocess_raw_circuit_ops function from here. It's now in transformer_gnn_core.py ---
 
 # --- Configuration ---
 NUM_PHYSICAL_QUBITS = 3 
@@ -45,8 +45,8 @@ LOG_DIR = 'logs/qera_training'
 UES_CONFIG = {
     'noise_embed_dim': 16, 
     'qec_embed_dim': 8,    
-    'max_circuit_gates': 5, 
-    'gate_embed_dim': 8,    
+    'max_circuit_gates': 5, # Max operations in simplified circuit for CircuitEncoder
+    'gate_embed_dim': 8,    # Embedding dimension for individual gates in CircuitEncoder
     'transformer_embed_dim': 64, 
     'transformer_num_heads': 2,
     'transformer_ff_dim': 128,
@@ -92,10 +92,8 @@ if __name__ == "__main__":
         ues_model = UESModel(UES_CONFIG)
         agent = UES_RL_Agent(ues_model, learning_rate=1e-3)
 
-        # Build UES model by passing dummy input once
-        # These dummy inputs are needed to build the model graph for ues_model.summary()
-        # They must be in the raw dictionary/list format as expected by UESModel.call()
-        # UESModel.call() internally handles calling the static preprocess methods from input_encoders.
+        # Build UES model by passing dummy input once (in RAW format)
+        # UESModel.call() will now handle preprocessing these raw inputs internally.
         
         dummy_noise_data_for_encoder_raw = {
             'gate_error_1q': NOISE_CONFIG['depolarizing_gate_1q'],
@@ -115,8 +113,7 @@ if __name__ == "__main__":
             'circuit_ops': dummy_circuit_ops_raw 
         }
         
-        # Pass dummy input to build model's graph. This call triggers the UESModel.call method,
-        # which will now correctly call the static preprocess methods internally.
+        # Pass dummy input in RAW format. UESModel.call will preprocess.
         _ = ues_model(dummy_inputs_raw_format) 
         ues_model.summary() # Print model summary
 

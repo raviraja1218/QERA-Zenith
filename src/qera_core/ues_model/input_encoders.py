@@ -117,8 +117,8 @@ class QECCodeEncoder(tf.keras.layers.Layer):
 class CircuitEncoder(tf.keras.layers.Layer):
     """
     Encodes quantum circuit structure.
-    For Keras 3 compatibility, its `call` method now expects a tensor of gate IDs directly.
-    The parsing from `List[Dict[str,Any]]` to `tf.Tensor` is handled by `_preprocess_raw_circuit_ops`.
+    Its `call` method now expects a tensor of gate IDs directly.
+    The raw data preprocessing is handled by `_preprocess_raw_circuit_ops` helper function (defined outside this class).
     """
     def __init__(self, max_gates: int = 20, gate_embedding_dim: int = 8, **kwargs):
         super().__init__(**kwargs)
@@ -126,8 +126,6 @@ class CircuitEncoder(tf.keras.layers.Layer):
         self.gate_types = {'h':0, 'x':1, 'cx':2, 'measure':3, 'identity':4, 'other':5} 
         self.gate_embedding = tf.keras.layers.Embedding(input_dim=len(self.gate_types), output_dim=gate_embedding_dim)
         
-        # GRU output will be (batch_size, gate_embedding_dim * 2)
-        # return_sequences=False makes GRU return the last output, not a sequence of outputs
         self.gru_layer = tf.keras.layers.GRU(gate_embedding_dim * 2, return_sequences=False) 
 
     def call(self, input_tensor_for_embedding: tf.Tensor): # <-- Expects tf.Tensor directly
@@ -144,30 +142,4 @@ class CircuitEncoder(tf.keras.layers.Layer):
         embedded_sequences = self.gate_embedding(input_tensor_for_embedding)
         return self.gru_layer(embedded_sequences)
 
-    @staticmethod # _preprocess_raw_circuit_ops
-    def _preprocess_raw_circuit_ops(
-        circuit_ops_batch: Union[List[List[Dict[str, Any]]], List[Dict[str, Any]]], 
-        max_gates: int, 
-        gate_types: Dict[str, int]
-    ) -> tf.Tensor:
-        """
-        Helper method to preprocess raw circuit_ops (list of dicts) into a padded tensor of gate IDs.
-        This method will be called BEFORE passing to CircuitEncoder.call.
-        """
-        if not isinstance(circuit_ops_batch, list) or (circuit_ops_batch and not isinstance(circuit_ops_batch[0], list)):
-            circuit_ops_batch = [circuit_ops_batch]
-
-        batched_gate_ids = []
-        for circuit_ops in circuit_ops_batch: 
-            gate_ids_single_circuit = []
-            for op in circuit_ops:
-                gate_name = op.get('name', 'other')
-                gate_id = gate_types.get(gate_name, gate_types['other'])
-                gate_ids_single_circuit.append(gate_id)
-            
-            padded_gate_ids = gate_ids_single_circuit + [gate_types['other']] * (max_gates - len(gate_ids_single_circuit))
-            padded_gate_ids = padded_gate_ids[:max_gates]
-            
-            batched_gate_ids.append(padded_gate_ids)
-        
-        return tf.constant(batched_gate_ids, dtype=tf.int32)
+    # REMOVED @staticmethod _preprocess_raw_circuit_ops from here. It is moved to transformer_gnn_core.py.
