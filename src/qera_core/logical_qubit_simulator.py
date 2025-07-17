@@ -4,7 +4,8 @@ from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 from qiskit_aer.noise import NoiseModel 
 from src.qera_core.state_representation import QuantumState 
-from qiskit.exceptions import QiskitError # Import QiskitError for robust error handling
+from qiskit.exceptions import QiskitError 
+# No need for specific get_density_matrix import, we will rely on attribute access + try/except
 
 class LogicalQubitSimulator:
     """
@@ -12,6 +13,11 @@ class LogicalQubitSimulator:
     This simulator builds a Qiskit QuantumCircuit internally and executes it with AerSimulator.
     """
     def __init__(self, num_qubits: int, qiskit_noise_model: NoiseModel = None):
+        """
+        Initializes the simulator with a specified number of qubits and an optional Qiskit Aer NoiseModel.
+        :param num_qubits: Total number of physical qubits in the simulation.
+        :param qiskit_noise_model: A qiskit_aer.noise.NoiseModel object. If None, assumes ideal simulation.
+        """
         self.num_qubits = num_qubits
         self.qiskit_noise_model = qiskit_noise_model
         
@@ -24,6 +30,12 @@ class LogicalQubitSimulator:
             self.simulator.set_options(noise_model=self.qiskit_noise_model)
 
     def add_gate(self, gate_name: str, target_qubits: list, control_qubits: list = None):
+        """
+        Adds a quantum gate operation to the internal Qiskit circuit queue.
+        :param gate_name: Name of the gate (e.g., 'h', 'x', 'cx', 'id').
+        :param target_qubits: List of integer indices of target qubits.
+        :param control_qubits: Optional list of integer indices for control qubits (for multi-qubit gates).
+        """
         if control_qubits is None or not control_qubits: 
             if len(target_qubits) != 1:
                 raise ValueError(f"Single-qubit gate '{gate_name}' expects 1 target qubit, got {len(target_qubits)}.")
@@ -81,34 +93,42 @@ class LogicalQubitSimulator:
         job = self.simulator.run(transpiled_qc, **run_options)
         result = job.result()
         
-        # --- ULTIMATE ROBUST FIX FOR QISKIT AER RESULT EXTRACTION ---
+        # --- ULTIMATE ROBUST FIX FOR QISKIT AER RESULT EXTRACTION (FINAL VERSION) ---
         final_qiskit_dm = None
         
         print(f"DEBUG: Qiskit Aer job.result().data() contains keys: {list(result.data().keys())}") # DEBUG PRINT
         
+        # Priority 1: Try to get density matrix directly
         try:
-            # First, try to get the density matrix directly (most desired)
-            final_qiskit_dm = result.get_density_matrix() 
-            print("DEBUG: Successfully retrieved density matrix using result.get_density_matrix().")
-        except QiskitError as e_dm:
-            print(f"DEBUG: result.get_density_matrix() failed ({e_dm}). Trying result.get_statevector().")
+            # Check for density_matrix attribute before calling
+            if hasattr(result, 'get_density_matrix'):
+                final_qiskit_dm = result.get_density_matrix() 
+                print("DEBUG: Successfully retrieved density matrix using result.get_density_matrix().")
+            else:
+                raise AttributeError("Attribute get_density_matrix is not defined for result object.")
+        except AttributeError as e_dm_attr: # Catch AttributeError specifically
+            print(f"DEBUG: result.get_density_matrix() failed ({e_dm_attr}), trying result.get_statevector().")
             try:
-                # If DM failed, try statevector and convert
-                sv = result.get_statevector()
-                final_qiskit_dm = np.outer(sv, sv.conj())
-                print("DEBUG: Successfully retrieved statevector and converted to density matrix.")
-            except QiskitError as e_sv:
-                # If both explicit getters fail, check if circuit was empty (e.g., just an ID gate)
-                # and if so, assume the initial state passed to simulator.run() is the final state.
-                if not qc_to_run.data: # Check if the Qiskit circuit had any operations
-                    print("DEBUG: Circuit was empty or only had implicit initial state. Assuming final state is initial state.")
-                    final_qiskit_dm = effective_initial_dm # Fallback to the initial density matrix
+                # Priority 2: Try to get statevector and convert
+                if hasattr(result, 'get_statevector'):
+                    sv = result.get_statevector()
+                    final_qiskit_dm = np.outer(sv, sv.conj())
+                    print("DEBUG: Successfully retrieved statevector and converted to density matrix.")
+                else:
+                    raise AttributeError("Attribute get_statevector is not defined for result object.")
+            except AttributeError as e_sv_attr: # Catch AttributeError for statevector
+                print(f"DEBUG: result.get_statevector() failed ({e_sv_attr}). Checking if circuit was empty or had no operations.")
+                # Priority 3: Fallback if circuit had no operations (like in env.reset() where only initial state is set)
+                # Check if the Qiskit circuit built (qc_to_run) had any instructions/data.
+                if not qc_to_run.data: # .data is the list of instructions in a Qiskit circuit
+                    print("DEBUG: Circuit was empty (no operations added). Falling back to initial state DM.")
+                    final_qiskit_dm = effective_initial_dm # Use the initial state passed to simulator.run()
                 else:
                     # If it had operations but still no state data, then a genuine simulation problem.
                     raise KeyError(
-                        f"Neither valid density matrix nor statevector found in Qiskit Aer result. "
-                        f"Last attempts errors: DM ({e_dm}), SV ({e_sv}). "
-                        f"This happens if simulation failed or result format changed for non-empty circuits."
+                        f"Neither valid density matrix nor statevector found in Qiskit Aer result for non-empty circuit. "
+                        f"Last attempts errors: DM attr ({e_dm_attr}), SV attr ({e_sv_attr}). "
+                        f"This might indicate simulation failure or unexpected result format."
                     )
         # --- END FIX ---
         
