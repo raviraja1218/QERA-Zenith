@@ -1,13 +1,10 @@
-# src/qera_core/logical_qubit_simulator.py
+# Cell 3.0 or 3.1: Code for src/qera_core/logical_qubit_simulator.py
 import numpy as np
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 from qiskit_aer.noise import NoiseModel # Correct import for Qiskit Aer's NoiseModel
 from src.qera_core.state_representation import QuantumState # Your custom QuantumState class
-
-# --- REMOVE all old numpy-based gate matrices like H_single, X_single, etc. from here ---
-# --- REMOVE the old _get_full_unitary helper function from here ---
-# These were from Phase 1 numpy simulator, now replaced by Qiskit's internal gate handling.
+from qiskit.exceptions import QiskitError # Import QiskitError to catch exceptions from get_statevector/get_density_matrix
 
 class LogicalQubitSimulator:
     """
@@ -29,8 +26,9 @@ class LogicalQubitSimulator:
         # Your custom QuantumState object, representing the current density matrix
         self.current_state = None 
 
-        # Set up the Aer simulator instance
-        self.simulator = AerSimulator(method='density_matrix') # Ensure density_matrix method is used
+        # Set up the Aer simulator instance. Use density_matrix method.
+        # However, for robustness, be prepared that the result object might optimize output.
+        self.simulator = AerSimulator(method='density_matrix') 
         if self.qiskit_noise_model:
             self.simulator.set_options(noise_model=self.qiskit_noise_model)
 
@@ -63,70 +61,66 @@ class LogicalQubitSimulator:
         :param qubit_idx: Index of the qubit to measure.
         :param classical_bit_idx: Optional classical bit to store the result. If None, Qiskit creates one.
         """
-        # Ensure classical bit exists if specified, create if not
         if classical_bit_idx is None:
             classical_bit_idx = qubit_idx 
-            # Ensure enough classical bits are allocated in the circuit
             if classical_bit_idx >= self.current_qiskit_circuit.num_clbits:
-                # Add a ClassicalRegister if current_qiskit_circuit doesn't have enough clbits
                 self.current_qiskit_circuit.add_register(QuantumCircuit.ClassicalRegister(max(1, classical_bit_idx + 1)))
             
         self.current_qiskit_circuit.measure(qubit_idx, classical_bit_idx)
 
 
     def execute_circuit(self, initial_state_str: str = '0', initial_state_dm: np.ndarray = None) -> QuantumState:
-        """
-        Executes the queued Qiskit operations.
-        :param initial_state_str: Initial state (e.g., '0' for |0...0>) string. Used if initial_state_dm is None.
-        :param initial_state_dm: Optional initial density matrix to directly set the state.
-        :return: The final QuantumState object (density matrix).
-        """
-        # Create a copy of the current Qiskit circuit to execute, then clear internal builder for next step
         qc_to_run = self.current_qiskit_circuit.copy() 
-        self.current_qiskit_circuit = QuantumCircuit(self.num_qubits) # Reset internal builder for next step
+        self.current_qiskit_circuit = QuantumCircuit(self.num_qubits) 
 
-        # Transpile the Qiskit circuit for the simulator
         transpiled_qc = transpile(qc_to_run, self.simulator)
 
-        # Determine initial state for simulation run
-        run_options = {'shots': 1} # For density_matrix method, shots only affect classical bit sampling
+        run_options = {'shots': 1} 
         
         if initial_state_dm is not None:
-            # Use provided density matrix as initial state for Aer simulator
             run_options['initial_state'] = initial_state_dm
         elif initial_state_str:
-            # Create initial statevector for Qiskit if string given (e.g., '0' for |00..0>)
             initial_sv = np.zeros(2**self.num_qubits, dtype=complex)
             if initial_state_str == '0': initial_sv[0] = 1.0
             else: raise ValueError("Only '0' string initial state supported when DM not provided for string initialization.")
-            run_options['initial_state'] = initial_sv # For Aer, can also take statevector
+            run_options['initial_state'] = initial_sv 
         else:
-            # If no initial state explicitly provided, and not set via set_current_state, assume |0...0>
             if self.current_state is None:
                 initial_sv = np.zeros(2**self.num_qubits, dtype=complex)
                 initial_sv[0] = 1.0
                 run_options['initial_state'] = initial_sv
             else:
-                # If current_state is already set (e.g., from env.step, set by set_current_state), use its DM
                 run_options['initial_state'] = self.current_state.get_density_matrix()
 
 
         job = self.simulator.run(transpiled_qc, **run_options)
         result = job.result()
         
-        # --- CRITICAL FIX FOR KeyError: 'density_matrix' ---
+        # --- CRITICAL FIX FOR Result Data Extraction ---
         final_qiskit_dm = None
-        if 'density_matrix' in result.data():
-            final_qiskit_dm = result.data()['density_matrix']
-        elif 'statevector' in result.data():
-            # If it's a statevector, convert it to a density matrix (|psi><psi|)
-            sv = result.get_statevector() # Get the Statevector object from result
-            final_qiskit_dm = np.outer(sv, sv.conj())
-        else:
-            raise KeyError("Neither 'density_matrix' nor 'statevector' found in Qiskit Aer result.data(). This might happen if simulation failed or result format changed.")
+        
+        print(f"DEBUG: Qiskit Aer job.result().data() contains keys: {list(result.data().keys())}") # DEBUG PRINT
+        
+        try:
+            # Try to get density matrix explicitly from the result object
+            # This method might be preferred if result.data() is empty
+            final_qiskit_dm = result.get_density_matrix() 
+            print("DEBUG: Successfully retrieved density matrix using result.get_density_matrix().")
+        except QiskitError as e: # Catch QiskitError if method is not defined or fails
+            print(f"DEBUG: result.get_density_matrix() failed ({e}), trying result.get_statevector().")
+            try:
+                # Try to get statevector and convert
+                sv = result.get_statevector()
+                final_qiskit_dm = np.outer(sv, sv.conj())
+                print("DEBUG: Successfully retrieved statevector and converted to density matrix.")
+            except QiskitError as e_sv: # Catch QiskitError if statevector method also fails
+                # If neither works, it means the simulation truly produced no state data for this job.
+                raise KeyError(
+                    f"Neither a valid density matrix nor statevector found in Qiskit Aer result. "
+                    f"Last attempt errors: DM ({e}), SV ({e_sv}). This might happen if simulation failed or result format changed."
+                )
         # --- END FIX ---
         
-        # Convert back to your internal QuantumState object
         self.current_state = QuantumState(self.num_qubits)
         self.current_state.set_density_matrix(final_qiskit_dm)
 
@@ -172,7 +166,6 @@ class LogicalQubitSimulator:
 
 # Example usage (for internal testing/understanding - will be in notebooks)
 if __name__ == "__main__":
-    # Using new Qiskit Aer imports
     from qiskit_aer.noise import NoiseModel, depolarizing_error, ReadoutError 
     
     # Create a simple Qiskit Aer noise model for testing
@@ -214,10 +207,10 @@ if __name__ == "__main__":
 
     print("\n--- Simulating Single Qubit X-gate with Noise ---")
     sim_single = LogicalQubitSimulator(1, qiskit_noise_model=noise_model_qiskit)
-    sim_single.add_gate('x', [0]) # Apply X to |0> -> |1>
+    sim_single.add_gate('x', [0])
     final_state_single = sim_single.execute_circuit('0')
     print(f"Final Density Matrix (noisy |1>):\n{final_state_single.get_density_matrix()}")
 
     ideal_1_state = np.array([0, 1], dtype=complex)
     fidelity_single = final_state_single.get_fidelity(ideal_1_state)
-    print(f"Fidelity with ideal |1> state: {fidelity_single:.4f}")
+    print(f"Fidelity with ideal |1> state: {fidelity:.4f}")
