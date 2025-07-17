@@ -18,14 +18,14 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 # Import core modules from src/qera_core
-# Note: input_encoders is NOT imported here directly anymore, as its static methods are called via the Encoder classes
+# Note: NoiseEncoder, QECCodeEncoder, CircuitEncoder are NOT imported here directly
+# as their static preprocess methods are now called via the UESModel's encoders (e.g., NoiseEncoder._preprocess_raw_noise_data)
+# or are part of transformer_gnn_core.py itself (_preprocess_raw_circuit_ops).
 from qera_core.rl_agent.environment_wrapper import QECEnvironment
 from qera_core.rl_agent.agent_logic import UES_RL_Agent
-from qera_core.ues_model.transformer_gnn_core import UESModel
-# REMOVED: from qera_core.ues_model.input_encoders import NoiseEncoder, QECCodeEncoder, CircuitEncoder 
-# The static preprocess methods are now called via the UESModel's encoders (e.g., NoiseEncoder._preprocess_raw_noise_data)
-# or are part of transformer_gnn_core.py itself (_preprocess_raw_circuit_ops).
+from qera_core.ues_model.transformer_gnn_core import UESModel 
 from qera_core.utils.logging_utils import setup_tensorboard_logger, log_episode_metrics
+
 
 # --- Configuration ---
 NUM_PHYSICAL_QUBITS = 3 
@@ -45,8 +45,8 @@ LOG_DIR = 'logs/qera_training'
 UES_CONFIG = {
     'noise_embed_dim': 16, 
     'qec_embed_dim': 8,    
-    'max_circuit_gates': 5, 
-    'gate_embed_dim': 8,    
+    'max_circuit_gates': 5, # Max operations in simplified circuit for CircuitEncoder
+    'gate_embed_dim': 8,    # Embedding dimension for individual gates in CircuitEncoder
     'transformer_embed_dim': 64, 
     'transformer_num_heads': 2,
     'transformer_ff_dim': 128,
@@ -93,7 +93,7 @@ if __name__ == "__main__":
         agent = UES_RL_Agent(ues_model, learning_rate=1e-3)
 
         # Build UES model by passing dummy input once (in RAW format)
-        # UESModel.call() will now handle preprocessing these raw inputs internally.
+        # UESModel.call() will now handle all preprocessing internally.
         
         dummy_noise_data_for_encoder_raw = {
             'gate_error_1q': NOISE_CONFIG['depolarizing_gate_1q'],

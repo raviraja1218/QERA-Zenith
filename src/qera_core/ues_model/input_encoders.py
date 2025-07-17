@@ -1,12 +1,16 @@
-# src/qera_core/ues_model/input_encoders.py
+# Cell 3.1: Code for src/qera_core/ues_model/input_encoders.py
 import tensorflow as tf
 import numpy as np
 from typing import Dict, Any, List, Union, Tuple 
 
-print("--- DEBUG: input_encoders.py is loaded. (Unique ID: Alpha - Final Version)") # Updated debug print
+print("--- DEBUG: input_encoders.py is loaded. (Unique ID: Alpha - FINAL CircuitEncoder Removed)") 
 
 class NoiseEncoder(tf.keras.layers.Layer):
-    """Encodes hardware noise parameters."""
+    """
+    Encodes hardware noise parameters.
+    Its `call` method now expects a tensor of numerical features.
+    Preprocessing from raw dicts to tensor is handled by `_preprocess_raw_noise_data`.
+    """
     def __init__(self, output_dim: int = 16, **kwargs):
         super().__init__(**kwargs)
         self.output_dim = output_dim
@@ -40,7 +44,11 @@ class NoiseEncoder(tf.keras.layers.Layer):
 
 
 class QECCodeEncoder(tf.keras.layers.Layer):
-    """Encodes QEC code properties."""
+    """
+    Encodes QEC code properties.
+    Its `call` method now expects pre-processed tensors.
+    Preprocessing from raw dicts to tensors is handled by `_preprocess_raw_qec_props`.
+    """
     def __init__(self, output_dim: int = 8, **kwargs):
         super().__init__(**kwargs)
         self.output_dim = output_dim
@@ -79,26 +87,5 @@ class QECCodeEncoder(tf.keras.layers.Layer):
             ])
         return tf.constant(code_type_ids, dtype=tf.int32), tf.convert_to_tensor(numerical_props_list, dtype=tf.float32)
 
-
-class CircuitEncoder(tf.keras.layers.Layer):
-    """
-    Encodes quantum circuit structure.
-    Its `call` method now expects a tensor of gate IDs directly.
-    """
-    def __init__(self, max_gates: int = 20, gate_embedding_dim: int = 8, **kwargs):
-        super().__init__(**kwargs)
-        self.max_gates = max_gates
-        self.gate_types = {'h':0, 'x':1, 'cx':2, 'measure':3, 'identity':4, 'other':5} 
-        self.gate_embedding = tf.keras.layers.Embedding(input_dim=len(self.gate_types), output_dim=gate_embedding_dim)
-        self.gru_layer = tf.keras.layers.GRU(gate_embedding_dim * 2, return_sequences=False) 
-
-    def call(self, input_tensor_for_embedding: tf.Tensor): 
-        if input_tensor_for_embedding.dtype != tf.int32:
-            raise TypeError(f"CircuitEncoder expects input_tensor_for_embedding to be tf.int32, but got {input_tensor_for_embedding.dtype}")
-        if len(input_tensor_for_embedding.shape) != 2:
-            raise ValueError(f"CircuitEncoder expects 2D input tensor (batch_size, max_gates), but got shape {input_tensor_for_embedding.shape}")
-
-        embedded_sequences = self.gate_embedding(input_tensor_for_embedding)
-        return self.gru_layer(embedded_sequences)
-
-# REMOVED @staticmethod _preprocess_raw_circuit_ops from here. It is moved to transformer_gnn_core.py.
+# CircuitEncoder class is REMOVED from this file.
+# Its functionality is inlined into transformer_gnn_core.py.

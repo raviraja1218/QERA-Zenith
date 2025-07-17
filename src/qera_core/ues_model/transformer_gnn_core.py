@@ -1,15 +1,13 @@
-# src/qera_core/ues_model/transformer_gnn_core.py
+# Cell 3.2: Code for src/qera_core/ues_model/transformer_gnn_core.py
 import tensorflow as tf
 from tensorflow.keras import layers, Model
 from typing import Dict, Any, List, Union, Tuple # Added Tuple for type hints
 
-# Import the encoders. Access their static methods via the class.
-# Note: CircuitEncoder's static method is *not* imported from here, it's defined below in this file.
-from src.qera_core.ues_model.input_encoders import NoiseEncoder, QECCodeEncoder, CircuitEncoder
+# Import NoiseEncoder and QECCodeEncoder. CircuitEncoder is no longer imported as a class.
+from src.qera_core.ues_model.input_encoders import NoiseEncoder, QECCodeEncoder 
 
-
-# --- DEBUG PRINT: Confirm which CircuitEncoder is imported ---
-print(f"--- DEBUG: CircuitEncoder is imported from: {CircuitEncoder.__module__}") 
+# --- DEBUG PRINT: Confirm input_encoders.py is loaded (via NoiseEncoder/QECCodeEncoder) ---
+print(f"--- DEBUG: input_encoders.py (via NoiseEncoder) is imported from: {NoiseEncoder.__module__}") 
 
 # --- Placeholder for a basic GNN layer ---
 class SimpleGraphConv(layers.Layer):
@@ -41,7 +39,11 @@ class TransformerBlock(layers.Layer):
         ffn_output = self.dropout2(ffn_output, training=training)
         return self.layernorm2(out1 + ffn_output)
 
-# --- NEW HELPER FUNCTION for CircuitEncoder preprocessing (MOVED HERE from input_encoders.py) ---
+# --- HELPER FUNCTION for CircuitEncoder preprocessing (MOVED HERE) ---
+# This function will be called directly in UESModel.call
+_circuit_encoder_gate_types = {'h':0, 'x':1, 'cx':2, 'measure':3, 'identity':4, 'other':5} # Define here
+_circuit_encoder_max_gates = 5 # Max gates for dummy input, should match UES_CONFIG['max_circuit_gates']
+
 def _preprocess_raw_circuit_ops(
     circuit_ops_batch: Union[List[List[Dict[str, Any]]], List[Dict[str, Any]]], 
     max_gates: int, 
@@ -49,7 +51,7 @@ def _preprocess_raw_circuit_ops(
 ) -> tf.Tensor:
     """
     Helper method to preprocess raw circuit_ops (list of dicts) into a padded tensor of gate IDs.
-    This method is called by UESModel.call BEFORE passing to CircuitEncoder.call.
+    This method will be called by UESModel.call BEFORE passing to CircuitEncoder.call.
     """
     if not isinstance(circuit_ops_batch, list) or (circuit_ops_batch and not isinstance(circuit_ops_batch[0], list)):
         circuit_ops_batch = [circuit_ops_batch]
@@ -79,14 +81,28 @@ class UESModel(Model):
         super().__init__()
         self.noise_encoder = NoiseEncoder(output_dim=config['noise_embed_dim'])
         self.qec_code_encoder = QECCodeEncoder(output_dim=config['qec_embed_dim'])
-        self.circuit_encoder = CircuitEncoder(max_gates=config['max_circuit_gates'],
-                                             gate_embedding_dim=config['gate_embed_dim'])
+        
+        # CircuitEncoder is NOT instantiated as a separate layer, its components are inlined in call.
+        self.circuit_encoder_max_gates = config['max_circuit_gates'] # Use config for max_gates
+        self.circuit_encoder_gate_embedding_dim = config['gate_embed_dim'] # Use config for embed_dim
+        
+        # Define embedding and GRU layers directly here in __init__
+        self.circuit_embedding_layer = layers.Embedding(
+            input_dim=len(_circuit_encoder_gate_types), # Use the global gate_types here
+            output_dim=self.circuit_encoder_gate_embedding_dim
+        )
+        self.circuit_gru_layer = layers.GRU(
+            self.circuit_encoder_gate_embedding_dim * 2, 
+            return_sequences=False
+        )
         
         self.gnn_placeholder = SimpleGraphConv(config['graph_embed_dim']) 
         
+        # Calculate total combined embedding dimension for the Transformer's input token
+        # This sum MUST match what the concat produces in the call method.
         total_combined_embed_dim = config['noise_embed_dim'] + \
                                    config['qec_embed_dim'] + \
-                                   (config['gate_embed_dim'] * 2) + \
+                                   (self.circuit_encoder_gate_embedding_dim * 2) + \
                                    config['graph_embed_dim'] 
 
         self.transformer_block = TransformerBlock(
@@ -106,8 +122,7 @@ class UESModel(Model):
         #          'qec_code_props': dict or list of dicts,
         #          'circuit_ops': list of dicts or list of lists of dicts}
         
-        # --- CRITICAL FIX: Pre-process raw inputs using static methods ---
-        # Call the static preprocessing methods BEFORE passing to the encoder layers.
+        # --- CRITICAL FIX: All preprocessing happens here, then feed pure tensors to encoders ---
         
         # NoiseEncoder input preprocessing (using its static method from input_encoders.py)
         noise_embed = self.noise_encoder(
@@ -119,11 +134,15 @@ class UESModel(Model):
             QECCodeEncoder._preprocess_raw_qec_props(inputs['qec_code_props'], self.qec_code_encoder.code_types)
         qec_embed = self.qec_code_encoder(code_type_ids_tensor, qec_numerical_props_tensor) # (batch_size, qec_embed_dim)
 
-        # CircuitEncoder input preprocessing (using the helper function defined in this file)
-        circuit_embed = self.circuit_encoder(
-            _preprocess_raw_circuit_ops(inputs['circuit_ops'], self.circuit_encoder.max_gates, self.circuit_encoder.gate_types)
-        ) # (batch_size, circuit_embed_dim) 
-
+        # CircuitEncoder INLINED preprocessing and call
+        preprocessed_circuit_tensor = _preprocess_raw_circuit_ops(
+            inputs['circuit_ops'], 
+            self.circuit_encoder_max_gates, # Use the max_gates from init
+            _circuit_encoder_gate_types # Use the global gate_types defined outside UESModel
+        )
+        circuit_embed = self.circuit_embedding_layer(preprocessed_circuit_tensor) # Apply embedding
+        circuit_embed = self.circuit_gru_layer(circuit_embed) # Apply GRU layer
+        
         # Concatenate embeddings for a single "token" per batch item for Transformer input
         combined_features_before_gnn = tf.concat([noise_embed, qec_embed, circuit_embed], axis=-1)
 
