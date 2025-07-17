@@ -1,4 +1,3 @@
-#!/opt/miniconda3/envs/qera_env/bin/python
 import sys
 import os
 import tensorflow as tf
