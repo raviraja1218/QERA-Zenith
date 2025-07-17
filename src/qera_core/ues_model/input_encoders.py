@@ -1,7 +1,9 @@
 # src/qera_core/ues_model/input_encoders.py
-import tensorflow as tf  # <--- CRITICAL FIX: ADD THIS LINE
+import tensorflow as tf
 import numpy as np
 from typing import Dict, Any, List, Union
+
+print("--- DEBUG: input_encoders.py is loaded. (Unique ID: Alpha)")
 
 class NoiseEncoder(tf.keras.layers.Layer):
     """Encodes hardware noise parameters into a fixed-size vector."""
@@ -65,59 +67,72 @@ class QECCodeEncoder(tf.keras.layers.Layer):
         return self.dense_layer(combined_input)
 
 class CircuitEncoder(tf.keras.layers.Layer):
-    """Encodes quantum circuit structure (simplified for Phase 1)."""
+    """
+    Encodes quantum circuit structure.
+    For Keras 3 compatibility, its `call` method now expects a tensor of gate IDs directly.
+    The parsing from `List[Dict[str,Any]]` to `tf.Tensor` is handled by `_preprocess_raw_circuit_ops`.
+    """
     def __init__(self, max_gates: int = 20, gate_embedding_dim: int = 8, **kwargs):
         super().__init__(**kwargs)
         self.max_gates = max_gates
-        # Updated input_dim based on your gate_types dict size (6 values)
         self.gate_types = {'h':0, 'x':1, 'cx':2, 'measure':3, 'identity':4, 'other':5} 
         self.gate_embedding = tf.keras.layers.Embedding(input_dim=len(self.gate_types), output_dim=gate_embedding_dim)
         
-        self.gru_layer = tf.keras.layers.GRU(gate_embedding_dim * 2) # GRU output will be 2 * gate_embedding_dim
+        # GRU output will be (batch_size, gate_embedding_dim * 2)
+        # return_sequences=False makes GRU return the last output, not a sequence of outputs
+        self.gru_layer = tf.keras.layers.GRU(gate_embedding_dim * 2, return_sequences=False) 
 
-    def call(self, circuit_ops_batch: Union[List[List[Dict[str, Any]]], List[Dict[str, Any]]]):
+    def call(self, input_tensor_for_embedding: tf.Tensor): # <-- CHANGED: Expects tf.Tensor directly
         """
-        :param circuit_ops_batch: A single list of ops (for one circuit) or a list of lists of ops (batch of circuits).
+        :param input_tensor_for_embedding: A tf.Tensor of shape (batch_size, max_gates) with dtype tf.int32,
+                                           containing integer IDs of gates.
         :return: Encoded tensor (batch_size, GRU_output_dim).
         """
-        print(f"\n--- CircuitEncoder.call received raw input: {circuit_ops_batch}")
-        print(f"--- CircuitEncoder.call input type: {type(circuit_ops_batch)}")
-        if isinstance(circuit_ops_batch, list) and len(circuit_ops_batch) > 0 and isinstance(circuit_ops_batch[0], dict):
-            # If it's a single circuit (list of dicts), convert to batch of 1
+        # No more complex parsing here, as input is already a tensor of IDs.
+        # This will contain the debug prints from before the last change, but no new ones.
+
+        if input_tensor_for_embedding.dtype != tf.int32:
+            raise TypeError(f"CircuitEncoder expects input_tensor_for_embedding to be tf.int32, but got {input_tensor_for_embedding.dtype}")
+        if len(input_tensor_for_embedding.shape) != 2:
+            raise ValueError(f"CircuitEncoder expects 2D input tensor (batch_size, max_gates), but got shape {input_tensor_for_embedding.shape}")
+
+        # Pass the tensor directly to the embedding layer
+        embedded_sequences = self.gate_embedding(input_tensor_for_embedding) # (batch_size, max_gates, embed_dim)
+        
+        # Pass the embedded sequences to the GRU layer
+        return self.gru_layer(embedded_sequences) # (batch_size, GRU_output_dim)
+
+    @staticmethod
+    def _preprocess_raw_circuit_ops(
+        circuit_ops_batch: Union[List[List[Dict[str, Any]]], List[Dict[str, Any]]], 
+        max_gates: int, 
+        gate_types: Dict[str, int]
+    ) -> tf.Tensor:
+        """
+        Helper method to preprocess raw circuit_ops (list of dicts) into a padded tensor of gate IDs.
+        This method will be called BEFORE passing to CircuitEncoder.call.
+        :param circuit_ops_batch: A single list of ops (for one circuit) or a list of lists of ops (batch of circuits).
+        :param max_gates: Max sequence length for padding.
+        :param gate_types: Dictionary mapping gate names to integer IDs.
+        :return: tf.Tensor of shape (batch_size, max_gates) with dtype tf.int32.
+        """
+        # Ensure input is always a list of circuits (even if batch size 1)
+        if not isinstance(circuit_ops_batch, list) or (circuit_ops_batch and not isinstance(circuit_ops_batch[0], list)):
             circuit_ops_batch = [circuit_ops_batch]
-            print(f"--- CircuitEncoder: Converted single circuit to batch: {circuit_ops_batch}")
-        elif not isinstance(circuit_ops_batch, list) or (circuit_ops_batch and not isinstance(circuit_ops_batch[0], list)):
-            # This should handle cases where the input is a single dict (incorrect, but for robustness)
-            # Or other non-list-of-list-of-dict cases.
-            # For our dummy input, it should be `[[{'type': 'gate', 'name': 'h', 'qubits': [0]}]]`
-            print(f"--- CircuitEncoder: Adjusting unexpected input format: {type(circuit_ops_batch)}")
-            if isinstance(circuit_ops_batch, dict): # If somehow got just the dict, wrap it twice.
-                circuit_ops_batch = [[circuit_ops_batch]]
-            elif isinstance(circuit_ops_batch, list) and len(circuit_ops_batch) > 0 and not isinstance(circuit_ops_batch[0], list): # list of dicts, but expected list of list of dicts
-                circuit_ops_batch = [circuit_ops_batch]
-            
+
         batched_gate_ids = []
         for circuit_ops in circuit_ops_batch: # Iterate through each circuit in the batch
             gate_ids_single_circuit = []
             for op in circuit_ops:
                 gate_name = op.get('name', 'other')
-                # This print should show the string 'h' for the dummy input
-                print(f"--- CircuitEncoder: Processing operation name: '{gate_name}'") 
-                gate_id = self.gate_types.get(gate_name, self.gate_types['other'])
+                gate_id = gate_types.get(gate_name, gate_types['other'])
                 gate_ids_single_circuit.append(gate_id)
             
             # Pad/truncate sequence for this single circuit
-            padded_gate_ids = gate_ids_single_circuit + [self.gate_types['other']] * (self.max_gates - len(gate_ids_single_circuit))
-            padded_gate_ids = padded_gate_ids[:self.max_gates]
+            padded_gate_ids = gate_ids_single_circuit + [gate_types['other']] * (max_gates - len(gate_ids_single_circuit))
+            padded_gate_ids = padded_gate_ids[:max_gates]
             
             batched_gate_ids.append(padded_gate_ids)
         
-        # This print should show the numerical ID, not 'h'
-        print(f"--- CircuitEncoder: batched_gate_ids before tf.constant: {batched_gate_ids}") 
-        input_tensor_for_embedding = tf.constant(batched_gate_ids, dtype=tf.int32)
-        print(f"--- CircuitEncoder: input_tensor_for_embedding shape: {input_tensor_for_embedding.shape}, dtype: {input_tensor_for_embedding.dtype}")
-        
-        embedded_sequences = self.gate_embedding(input_tensor_for_embedding)
-        print(f"--- CircuitEncoder: embedded_sequences shape: {embedded_sequences.shape}")
-        
-        return self.gru_layer(embedded_sequences)
+        # Convert the list of padded ID lists into a single TensorFlow tensor (batch_size, max_gates)
+        return tf.constant(batched_gate_ids, dtype=tf.int32)
