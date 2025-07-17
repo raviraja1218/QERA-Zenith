@@ -3,6 +3,7 @@ import numpy as np
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 from qiskit_aer.noise import NoiseModel 
+from qiskit_aer.library import save_statevector, save_density_matrix # NEW IMPORT: To force saving state
 from src.qera_core.state_representation import QuantumState 
 from qiskit.exceptions import QiskitError 
 
@@ -29,12 +30,6 @@ class LogicalQubitSimulator:
             self.simulator.set_options(noise_model=self.qiskit_noise_model)
 
     def add_gate(self, gate_name: str, target_qubits: list, control_qubits: list = None):
-        """
-        Adds a quantum gate operation to the internal Qiskit circuit queue.
-        :param gate_name: Name of the gate (e.g., 'h', 'x', 'cx', 'id').
-        :param target_qubits: List of integer indices of target qubits.
-        :param control_qubits: Optional list of integer indices for control qubits (for multi-qubit gates).
-        """
         if control_qubits is None or not control_qubits: 
             if len(target_qubits) != 1:
                 raise ValueError(f"Single-qubit gate '{gate_name}' expects 1 target qubit, got {len(target_qubits)}.")
@@ -86,50 +81,32 @@ class LogicalQubitSimulator:
 
         run_options['initial_state'] = effective_initial_dm
 
-
+        # --- CRITICAL FIX: Force Qiskit Aer to save the state ---
+        # Add a save_density_matrix instruction to the end of the circuit.
+        # This guarantees result.data() will contain the density matrix.
+        qc_to_run.save_density_matrix() 
+        
         job = self.simulator.run(transpiled_qc, **run_options)
         result = job.result()
         
-        # --- ULTIMATE ROBUST FIX FOR QISKIT AER RESULT EXTRACTION (FINAL FINAL FINAL VERSION!) ---
+        # --- ROBUST RESULT EXTRACTION (Now simplified as save_density_matrix forces output) ---
         final_qiskit_dm = None
         
-        print(f"DEBUG: Qiskit Aer job.result().data() contains keys: {list(result.data().keys())}") # DEBUG PRINT
+        print(f"DEBUG: Qiskit Aer job.result().data() contains keys (after save_density_matrix): {list(result.data().keys())}") # DEBUG PRINT
         
-        try:
-            # Priority 1: Try to get density matrix directly via attribute and call
-            if hasattr(result, 'get_density_matrix') and callable(result.get_density_matrix):
-                final_qiskit_dm = result.get_density_matrix() 
-                print("DEBUG: Successfully retrieved density matrix using result.get_density_matrix().")
-            else:
-                # If method doesn't exist, it means the result object is too simple.
-                # Skip to trying statevector, and if that fails, then the fallback.
-                raise AttributeError("Attribute get_density_matrix is not defined or not callable.") 
-        except AttributeError as e_dm_attr: # Catch AttributeError specifically for get_density_matrix
-            print(f"DEBUG: result.get_density_matrix() failed ({e_dm_attr}). Trying result.get_statevector().")
-            try:
-                # Priority 2: Try to get statevector via attribute and call
-                if hasattr(result, 'get_statevector') and callable(result.get_statevector):
-                    final_qiskit_dm = result.get_statevector() # Get Statevector object
-                    final_qiskit_dm = np.outer(final_qiskit_dm, final_qiskit_dm.conj()) # Convert to DM
-                    print("DEBUG: Successfully retrieved statevector and converted to density matrix.")
-                else:
-                    # If method doesn't exist, it means the result object is too simple.
-                    # Skip to the final fallback logic.
-                    raise AttributeError("Attribute get_statevector is not defined or not callable.") 
-            except (AttributeError, KeyError, QiskitError) as e_sv_fail: # <--- CRUCIAL CHANGE: Catch QiskitError and KeyError here
-                print(f"DEBUG: result.get_statevector() failed ({e_sv_fail}). Checking if circuit was empty or had no operations.")
-                # Priority 3: Fallback if circuit had no operations (like in env.reset() or just initial state setup)
-                # If the Qiskit circuit built (qc_to_run) has NO actual operations/instructions in its data list.
-                if not qc_to_run.data: 
-                    print("DEBUG: Circuit was empty (no operations added). Falling back to initial state DM.")
-                    final_qiskit_dm = effective_initial_dm # Use the initial state passed to simulator.run()
-                else:
-                    # If it had operations but still no state data, then a genuine simulation problem.
-                    raise KeyError(
-                        f"Neither valid density matrix nor statevector found in Qiskit Aer result for non-empty circuit. "
-                        f"Last attempts errors: DM attr ({e_dm_attr}), SV fail ({e_sv_fail}). "
-                        f"This might indicate simulation failure or unexpected result format."
-                    )
+        if 'density_matrix' in result.data(): # This should now ALWAYS be true
+            final_qiskit_dm = result.data()['density_matrix']
+            print("DEBUG: Successfully retrieved density matrix from result.data().")
+        elif 'statevector' in result.data(): # Fallback if for some reason it saves statevector (less likely with density_matrix method)
+            sv = result.get_statevector() # Get the Statevector object from result
+            final_qiskit_dm = np.outer(sv, sv.conj())
+            print("DEBUG: Retrieved statevector and converted to density matrix.")
+        else:
+            # This 'else' block should ideally never be reached now.
+            raise KeyError(
+                "Neither 'density_matrix' nor 'statevector' found in Qiskit Aer result.data() "
+                "EVEN AFTER save_density_matrix(). This indicates a severe simulator issue."
+            )
         # --- END FIX ---
         
         self.current_state = QuantumState(self.num_qubits)
@@ -138,23 +115,39 @@ class LogicalQubitSimulator:
         return self.current_state
 
     def set_current_state(self, state: QuantumState):
+        """
+        Sets the simulator's current quantum state directly.
+        This is useful for continuing a simulation from a specific state,
+        e.g., passing the state from one step to the next in an RL environment.
+        It also clears the Qiskit circuit queue.
+        :param state: The QuantumState object to set as the current state.
+        """
         if not isinstance(state, QuantumState) or state.num_qubits != self.num_qubits:
             raise ValueError("Provided state is not a valid QuantumState object or has incorrect number of qubits.")
         self.current_state = state
+        # When setting current state, we need to reset the internal Qiskit circuit builder
+        # with the correct number of classical bits if any measurements were added previously.
+        # For simplicity, just reset with quantum bits. Classical bits can be added dynamically.
         self.current_qiskit_circuit = QuantumCircuit(self.num_qubits) 
 
 
     def get_final_measurements(self, num_shots: int = 1) -> dict:
-        meas_qc = QuantumCircuit(self.num_qubits, self.num_qubits) 
+        """
+        Simulates measuring all qubits multiple times in the Z-basis from the current_state.
+        Uses Qiskit Aer's measurement capability on the current density matrix.
+        :param num_shots: Number of times to repeat the measurement.
+        :return: A dictionary of measurement outcomes (e.g., {'00': 50, '01': 25, ...}).
+        """
+        meas_qc = QuantumCircuit(self.num_qubits, self.num_qubits) # Qiskit automatically creates clbits here
         meas_qc.measure(range(self.num_qubits), range(self.num_qubits))
 
         transpiled_meas_qc = transpile(meas_qc, self.simulator)
 
         job = self.simulator.run(transpiled_meas_qc, shots=num_shots, initial_state=self.current_state.get_density_matrix())
         result = job.result()
-        # Ensure counts are retrieved from the correct transpiled_meas_qc experiment
-        # The line `counts = result.get_counts(transpiled_qc)` in the original was an error.
-        counts = result.get_counts(transpiled_meas_qc) # Fix: use transpiled_meas_qc
+        # Note: result.get_counts(transpiled_qc) was used previously.
+        # It should be transpiled_meas_qc for this specific measurement circuit's counts.
+        counts = result.get_counts(transpiled_meas_qc) 
         return counts
 
 # Example usage (for internal testing/understanding - will be in notebooks)
