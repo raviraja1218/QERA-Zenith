@@ -1,10 +1,10 @@
 # src/qera_core/ues_model/transformer_gnn_core.py
 import tensorflow as tf
 from tensorflow.keras import layers, Model
-from typing import Dict, Any, List, Union 
+from typing import Dict, Any, List, Union, Tuple # Added Tuple for type hints
 
 # Import the encoders. Access their static methods via the class.
-# We no longer import CircuitEncoder's static method from here, it's moved into this file.
+# Note: CircuitEncoder's static method is *not* imported from here, it's defined below in this file.
 from src.qera_core.ues_model.input_encoders import NoiseEncoder, QECCodeEncoder, CircuitEncoder
 
 
@@ -49,9 +49,8 @@ def _preprocess_raw_circuit_ops(
 ) -> tf.Tensor:
     """
     Helper method to preprocess raw circuit_ops (list of dicts) into a padded tensor of gate IDs.
-    This method will be called by UESModel.call BEFORE passing to CircuitEncoder.call.
+    This method is called by UESModel.call BEFORE passing to CircuitEncoder.call.
     """
-    # Ensure input is always a list of circuits (even if batch size 1)
     if not isinstance(circuit_ops_batch, list) or (circuit_ops_batch and not isinstance(circuit_ops_batch[0], list)):
         circuit_ops_batch = [circuit_ops_batch]
 
@@ -107,15 +106,15 @@ class UESModel(Model):
         #          'qec_code_props': dict or list of dicts,
         #          'circuit_ops': list of dicts or list of lists of dicts}
         
-        # --- CRITICAL FIX: Pre-process raw inputs using static methods from input_encoders ---
+        # --- CRITICAL FIX: Pre-process raw inputs using static methods ---
         # Call the static preprocessing methods BEFORE passing to the encoder layers.
         
-        # NoiseEncoder input preprocessing (using its static method)
+        # NoiseEncoder input preprocessing (using its static method from input_encoders.py)
         noise_embed = self.noise_encoder(
             NoiseEncoder._preprocess_raw_noise_data(inputs['noise_data'], self.noise_encoder.expected_noise_keys)
         ) # (batch_size, noise_embed_dim)
 
-        # QECCodeEncoder input preprocessing (using its static method)
+        # QECCodeEncoder input preprocessing (using its static method from input_encoders.py)
         code_type_ids_tensor, qec_numerical_props_tensor = \
             QECCodeEncoder._preprocess_raw_qec_props(inputs['qec_code_props'], self.qec_code_encoder.code_types)
         qec_embed = self.qec_code_encoder(code_type_ids_tensor, qec_numerical_props_tensor) # (batch_size, qec_embed_dim)
