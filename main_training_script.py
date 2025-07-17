@@ -5,7 +5,7 @@ import os
 import tensorflow as tf
 import time
 import datetime
-from typing import Dict, Any, List, Union # Needed for type hints in helper function
+from typing import Dict, Any, List, Union # Needed for type hints
 
 # NEW IMPORTS for Phase 2: Qiskit NoiseModel
 from qiskit_aer.noise import NoiseModel, depolarizing_error, ReadoutError 
@@ -18,49 +18,14 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 # Import core modules from src/qera_core
+# Note: input_encoders is specifically needed here for its static methods
 from qera_core.rl_agent.environment_wrapper import QECEnvironment
 from qera_core.rl_agent.agent_logic import UES_RL_Agent
 from qera_core.ues_model.transformer_gnn_core import UESModel
+from qera_core.ues_model.input_encoders import NoiseEncoder, QECCodeEncoder, CircuitEncoder # Import encoders to access static preprocess methods
 from qera_core.utils.logging_utils import setup_tensorboard_logger, log_episode_metrics
 
-# --- Helper for CircuitEncoder input processing ---
-# This function is duplicated here from input_encoders.py to ensure the input
-# to CircuitEncoder is always a tensor, bypassing Keras 3's strict tracing.
-# This is a temporary measure for Phase 1/2 setup. In a more mature project,
-# this preprocessing would be part of a data pipeline.
-def _preprocess_raw_circuit_ops(
-    circuit_ops_batch: Union[List[List[Dict[str, Any]]], List[Dict[str, Any]]], 
-    max_gates: int, 
-    gate_types: Dict[str, int]
-) -> tf.Tensor:
-    """
-    Helper method to preprocess raw circuit_ops (list of dicts) into a padded tensor of gate IDs.
-    This method is called BEFORE passing to CircuitEncoder.call.
-    :param circuit_ops_batch: A single list of ops (for one circuit) or a list of lists of ops (batch of circuits).
-    :param max_gates: Max sequence length for padding.
-    :param gate_types: Dictionary mapping gate names to integer IDs (from CircuitEncoder).
-    :return: tf.Tensor of shape (batch_size, max_gates) with dtype tf.int32.
-    """
-    # Ensure input is always a list of circuits (even if batch size 1)
-    if not isinstance(circuit_ops_batch, list) or (circuit_ops_batch and not isinstance(circuit_ops_batch[0], list)):
-        circuit_ops_batch = [circuit_ops_batch]
-
-    batched_gate_ids = []
-    for circuit_ops in circuit_ops_batch: # Iterate through each circuit in the batch
-        gate_ids_single_circuit = []
-        for op in circuit_ops:
-            gate_name = op.get('name', 'other')
-            gate_id = gate_types.get(gate_name, gate_types['other'])
-            gate_ids_single_circuit.append(gate_id)
-        
-        # Pad/truncate sequence for this single circuit
-        padded_gate_ids = gate_ids_single_circuit + [gate_types['other']] * (max_gates - len(gate_ids_single_circuit))
-        padded_gate_ids = padded_gate_ids[:max_gates]
-        
-        batched_gate_ids.append(padded_gate_ids)
-    
-    # Convert the list of padded ID lists into a single TensorFlow tensor (batch_size, max_gates)
-    return tf.constant(batched_gate_ids, dtype=tf.int32)
+# --- REMOVED: The _preprocess_raw_circuit_ops function from here. It's now in input_encoders.py ---
 
 # --- Configuration ---
 NUM_PHYSICAL_QUBITS = 3 
@@ -80,8 +45,8 @@ LOG_DIR = 'logs/qera_training'
 UES_CONFIG = {
     'noise_embed_dim': 16, 
     'qec_embed_dim': 8,    
-    'max_circuit_gates': 5, # Max operations in simplified circuit for CircuitEncoder
-    'gate_embed_dim': 8,    # Embedding dimension for individual gates in CircuitEncoder
+    'max_circuit_gates': 5, 
+    'gate_embed_dim': 8,    
     'transformer_embed_dim': 64, 
     'transformer_num_heads': 2,
     'transformer_ff_dim': 128,
@@ -128,7 +93,11 @@ if __name__ == "__main__":
         agent = UES_RL_Agent(ues_model, learning_rate=1e-3)
 
         # Build UES model by passing dummy input once
-        dummy_noise_data_for_encoder = {
+        # These dummy inputs are needed to build the model graph for ues_model.summary()
+        # They must be in the raw dictionary/list format as expected by UESModel.call()
+        # UESModel.call() internally handles calling the static preprocess methods from input_encoders.
+        
+        dummy_noise_data_for_encoder_raw = {
             'gate_error_1q': NOISE_CONFIG['depolarizing_gate_1q'],
             'gate_error_2q': NOISE_CONFIG['depolarizing_gate_2q'],
             'readout_error': NOISE_CONFIG['readout_error'],
@@ -137,42 +106,26 @@ if __name__ == "__main__":
             'crosstalk_strength_avg': NOISE_CONFIG['crosstalk_strength_avg']
         }
         
-        dummy_qec_props = {'code_type':'repetition', 'distance':3, 'num_physical_qubits':3, 'num_logical_qubits':1}
-        
-        # --- CRITICAL FIX: Pre-process circuit_ops for CircuitEncoder ---
-        # Call the static helper method to convert raw circuit ops to tensor of IDs
-        # We need the gate_types dict from CircuitEncoder to preprocess
-        # Access it via a dummy instance or directly from the class if it were a static property.
-        # For simplicity, let's duplicate the gate_types dict here for preprocessing.
-        
-        # Define gate_types here, matching CircuitEncoder's __init__
-        circuit_encoder_gate_types = {'h':0, 'x':1, 'cx':2, 'measure':3, 'identity':4, 'other':5}
-        
+        dummy_qec_props_raw = {'code_type':'repetition', 'distance':3, 'num_physical_qubits':3, 'num_logical_qubits':1}
         dummy_circuit_ops_raw = [{'type':'gate', 'name':'h', 'qubits':[0]}] 
-        dummy_circuit_ops_processed = _preprocess_raw_circuit_ops(
-            dummy_circuit_ops_raw,
-            UES_CONFIG['max_circuit_gates'],
-            circuit_encoder_gate_types
-        )
-        # --- End CRITICAL FIX ---
-
-        dummy_inputs = {
-            'noise_data': dummy_noise_data_for_encoder, 
-            'qec_code_props': dummy_qec_props, 
-            'circuit_ops': dummy_circuit_ops_processed # <-- Pass the PRE-PROCESSED TENSOR
+        
+        dummy_inputs_raw_format = {
+            'noise_data': dummy_noise_data_for_encoder_raw, 
+            'qec_code_props': dummy_qec_props_raw, 
+            'circuit_ops': dummy_circuit_ops_raw 
         }
         
-        # Pass dummy input to build model's graph. This call triggers the UESModel.call method.
-        _ = ues_model(dummy_inputs) 
+        # Pass dummy input to build model's graph. This call triggers the UESModel.call method,
+        # which will now correctly call the static preprocess methods internally.
+        _ = ues_model(dummy_inputs_raw_format) 
         ues_model.summary() # Print model summary
 
         print(f"Starting QERA Phase 1 RL Training for {NUM_EPISODES} episodes...")
 
         for episode in range(NUM_EPISODES):
-            # The observation from env.reset() also needs its 'circuit_ops' pre-processed
-            # before passing to agent.choose_action().
-            # Let's modify agent.choose_action() and agent.learn() to handle this preprocessing.
-            # For now, the dummy input for ues_model.summary() is fixed.
+            # All observations coming from env.reset() and env.step() are in RAW dictionary/list format.
+            # The UESModel.call method (called by agent.choose_action and agent.learn)
+            # now expects and handles this raw format by internally calling the static preprocessors.
             
             observation = env.reset()
             done = False
@@ -180,7 +133,7 @@ if __name__ == "__main__":
             experiences = []
 
             while not done:
-                action = agent.choose_action(observation) # This will call UESModel
+                action = agent.choose_action(observation) 
                 next_observation, reward, done, info = env.step(action)
                 experiences.append((observation, action, reward, next_observation, done))
                 episode_rewards.append(reward)
