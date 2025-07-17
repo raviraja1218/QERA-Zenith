@@ -1,9 +1,11 @@
 # Cell 3.0 or 3.1: Code for src/qera_core/logical_qubit_simulator.py
 import numpy as np
 from qiskit import QuantumCircuit, transpile
+# Ensure these imports are consistent with your Qiskit installation (0.45.0 stack)
 from qiskit_aer import AerSimulator
 from qiskit_aer.noise import NoiseModel 
-from qiskit_aer.library import save_statevector, save_density_matrix # NEW IMPORT: To force saving state
+# New import: save_statevector (we'll try this as save_density_matrix failed)
+from qiskit_aer.library import save_statevector # Use save_statevector instead of save_density_matrix
 from src.qera_core.state_representation import QuantumState 
 from qiskit.exceptions import QiskitError 
 
@@ -25,7 +27,10 @@ class LogicalQubitSimulator:
         
         self.current_state = None 
 
-        self.simulator = AerSimulator(method='density_matrix') 
+        # --- CRITICAL CHANGE: Use statevector method for AerSimulator ---
+        # This is generally more robust for getting state information out of result.
+        # We will convert it to a density matrix manually.
+        self.simulator = AerSimulator(method='statevector') 
         if self.qiskit_noise_model:
             self.simulator.set_options(noise_model=self.qiskit_noise_model)
 
@@ -81,32 +86,39 @@ class LogicalQubitSimulator:
 
         run_options['initial_state'] = effective_initial_dm
 
-        # --- CRITICAL FIX: Force Qiskit Aer to save the state ---
-        # Add a save_density_matrix instruction to the end of the circuit.
-        # This guarantees result.data() will contain the density matrix.
-        qc_to_run.save_density_matrix() 
+        # --- CRITICAL CHANGE: Force Qiskit Aer to save STATEVECTOR ---
+        # This guarantees result.data() will contain the statevector (if simulation method is statevector).
+        # We will then convert it to a density matrix.
+        qc_to_run.save_statevector() 
         
         job = self.simulator.run(transpiled_qc, **run_options)
         result = job.result()
         
-        # --- ROBUST RESULT EXTRACTION (Now simplified as save_density_matrix forces output) ---
+        # --- ROBUST RESULT EXTRACTION (Now optimized for statevector method) ---
         final_qiskit_dm = None
         
-        print(f"DEBUG: Qiskit Aer job.result().data() contains keys (after save_density_matrix): {list(result.data().keys())}") # DEBUG PRINT
+        print(f"DEBUG: Qiskit Aer job.result().data() contains keys (after save_statevector): {list(result.data().keys())}") # DEBUG PRINT
         
-        if 'density_matrix' in result.data(): # This should now ALWAYS be true
-            final_qiskit_dm = result.data()['density_matrix']
-            print("DEBUG: Successfully retrieved density matrix from result.data().")
-        elif 'statevector' in result.data(): # Fallback if for some reason it saves statevector (less likely with density_matrix method)
-            sv = result.get_statevector() # Get the Statevector object from result
-            final_qiskit_dm = np.outer(sv, sv.conj())
-            print("DEBUG: Retrieved statevector and converted to density matrix.")
-        else:
-            # This 'else' block should ideally never be reached now.
-            raise KeyError(
-                "Neither 'density_matrix' nor 'statevector' found in Qiskit Aer result.data() "
-                "EVEN AFTER save_density_matrix(). This indicates a severe simulator issue."
-            )
+        try:
+            # Priority 1: Get statevector directly (most desired with method='statevector')
+            # Use get_statevector() which is robust, it will throw QiskitError if not available.
+            final_qiskit_sv = result.get_statevector() 
+            final_qiskit_dm = np.outer(final_qiskit_sv, final_qiskit_sv.conj()) # Convert to DM
+            print("DEBUG: Successfully retrieved statevector and converted to density matrix.")
+        except QiskitError as e_sv_fail: # Catch QiskitError from get_statevector()
+            print(f"DEBUG: result.get_statevector() failed ({e_sv_fail}). Checking if circuit was empty or had no operations.")
+            # Fallback if circuit had no operations (like in env.reset() or just initial state setup)
+            # If the Qiskit circuit built (qc_to_run) has NO actual operations/instructions in its data list.
+            if not qc_to_run.data: 
+                print("DEBUG: Circuit was empty (no operations added). Falling back to initial state DM.")
+                final_qiskit_dm = effective_initial_dm # Use the initial state passed to simulator.run()
+            else:
+                # If it had operations but still no state data, then a genuine simulation problem.
+                raise KeyError(
+                    f"Neither valid density matrix nor statevector found in Qiskit Aer result for non-empty circuit. "
+                    f"Last attempt errors: SV fail ({e_sv_fail}). "
+                    f"This might indicate simulation failure or unexpected result format."
+                )
         # --- END FIX ---
         
         self.current_state = QuantumState(self.num_qubits)
@@ -115,19 +127,9 @@ class LogicalQubitSimulator:
         return self.current_state
 
     def set_current_state(self, state: QuantumState):
-        """
-        Sets the simulator's current quantum state directly.
-        This is useful for continuing a simulation from a specific state,
-        e.g., passing the state from one step to the next in an RL environment.
-        It also clears the Qiskit circuit queue.
-        :param state: The QuantumState object to set as the current state.
-        """
         if not isinstance(state, QuantumState) or state.num_qubits != self.num_qubits:
             raise ValueError("Provided state is not a valid QuantumState object or has incorrect number of qubits.")
         self.current_state = state
-        # When setting current state, we need to reset the internal Qiskit circuit builder
-        # with the correct number of classical bits if any measurements were added previously.
-        # For simplicity, just reset with quantum bits. Classical bits can be added dynamically.
         self.current_qiskit_circuit = QuantumCircuit(self.num_qubits) 
 
 
@@ -138,15 +140,21 @@ class LogicalQubitSimulator:
         :param num_shots: Number of times to repeat the measurement.
         :return: A dictionary of measurement outcomes (e.g., {'00': 50, '01': 25, ...}).
         """
-        meas_qc = QuantumCircuit(self.num_qubits, self.num_qubits) # Qiskit automatically creates clbits here
+        meas_qc = QuantumCircuit(self.num_qubits, self.num_qubits) 
         meas_qc.measure(range(self.num_qubits), range(self.num_qubits))
 
         transpiled_meas_qc = transpile(meas_qc, self.simulator)
 
+        # For measurements, if simulator method is 'statevector', initial_state should be statevector
+        # Our current_state is a density matrix, so convert it to statevector if it's pure
+        # or use its density matrix directly, but run_options['initial_state'] expects sv or dm compatible with method.
+        # It's safest to convert current_state.get_density_matrix() to Statevector if possible, else handle.
+        
+        # If the state is guaranteed pure:
+        # job = self.simulator.run(transpiled_meas_qc, shots=num_shots, initial_state=self.current_state.get_statevector_from_dm()) # Need helper
+        # For now, let's keep get_density_matrix() for initial_state here, assuming Aer handles it.
         job = self.simulator.run(transpiled_meas_qc, shots=num_shots, initial_state=self.current_state.get_density_matrix())
         result = job.result()
-        # Note: result.get_counts(transpiled_qc) was used previously.
-        # It should be transpiled_meas_qc for this specific measurement circuit's counts.
         counts = result.get_counts(transpiled_meas_qc) 
         return counts
 
