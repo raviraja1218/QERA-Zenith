@@ -4,7 +4,7 @@ from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 from qiskit_aer.noise import NoiseModel 
 from src.qera_core.state_representation import QuantumState 
-from qiskit.exceptions import QiskitError # Import QiskitError for robust error handling
+from qiskit.exceptions import QiskitError 
 
 class LogicalQubitSimulator:
     """
@@ -76,16 +76,15 @@ class LogicalQubitSimulator:
             initial_sv = np.zeros(2**self.num_qubits, dtype=complex)
             if initial_state_str == '0': initial_sv[0] = 1.0
             else: raise ValueError("Only '0' string initial state supported when DM not provided for string initialization.")
-            effective_initial_dm = np.outer(initial_sv, initial_sv.conj()) # Convert SV to DM
+            effective_initial_dm = np.outer(initial_sv, initial_sv.conj()) 
         else:
             if self.current_state is not None:
                 effective_initial_dm = self.current_state.get_density_matrix()
-            else: # Default to |0> if no state provided anywhere
+            else: 
                 initial_sv = np.zeros(2**self.num_qubits, dtype=complex)
                 initial_sv[0] = 1.0
                 effective_initial_dm = np.outer(initial_sv, initial_sv.conj())
 
-        # Always pass initial_state to simulator.run()
         run_options['initial_state'] = effective_initial_dm
 
 
@@ -95,31 +94,32 @@ class LogicalQubitSimulator:
         # --- ULTIMATE ROBUST FIX FOR QISKIT AER RESULT EXTRACTION (FINAL FINAL VERSION!) ---
         final_qiskit_dm = None
         
-        print(f"DEBUG: Qiskit Aer job.result().data() contains keys: {list(result.data().keys())}") # DEBUG PRINT
+        print(f"DEBUG: Qiskit Aer job.result().data() contains keys: {list(result.data().keys())}") 
         
         try:
-            # Priority 1: Try to get density matrix via result.get_density_matrix()
-            # Check if method exists before calling, then attempt.
-            if hasattr(result, 'get_density_matrix'):
+            # Priority 1: Try to get density matrix directly via attribute and call
+            if hasattr(result, 'get_density_matrix') and callable(result.get_density_matrix):
                 final_qiskit_dm = result.get_density_matrix() 
                 print("DEBUG: Successfully retrieved density matrix using result.get_density_matrix().")
             else:
-                raise AttributeError("Attribute get_density_matrix is not defined for result object.") # Raise to go to next except block
+                # This will go to the next except block
+                raise AttributeError("Attribute get_density_matrix is not defined or not callable.") 
         except AttributeError as e_dm_attr: # Catch AttributeError specifically for get_density_matrix
             print(f"DEBUG: result.get_density_matrix() failed ({e_dm_attr}). Trying result.get_statevector().")
             try:
-                # Priority 2: Try to get statevector and convert
-                if hasattr(result, 'get_statevector'):
+                # Priority 2: Try to get statevector via attribute and call
+                if hasattr(result, 'get_statevector') and callable(result.get_statevector):
                     sv = result.get_statevector()
                     final_qiskit_dm = np.outer(sv, sv.conj())
                     print("DEBUG: Successfully retrieved statevector and converted to density matrix.")
                 else:
-                    raise AttributeError("Attribute get_statevector is not defined for result object.") # Raise to go to next except block
+                    # This will go to the final fallback block
+                    raise AttributeError("Attribute get_statevector is not defined or not callable.")
             except AttributeError as e_sv_attr: # Catch AttributeError for statevector
                 print(f"DEBUG: result.get_statevector() failed ({e_sv_attr}). Checking if circuit was empty or had no operations.")
                 # Priority 3: Fallback if circuit had no operations (like in env.reset() or just initial state setup)
-                # Check if the Qiskit circuit built (qc_to_run) has any actual operations/instructions in its data list.
-                if not qc_to_run.data: # .data is the list of instructions in a Qiskit circuit
+                # If the Qiskit circuit built (qc_to_run) has NO actual operations/instructions in its data list.
+                if not qc_to_run.data: 
                     print("DEBUG: Circuit was empty (no operations added). Falling back to initial state DM.")
                     final_qiskit_dm = effective_initial_dm # Use the initial state passed to simulator.run()
                 else:
@@ -137,13 +137,6 @@ class LogicalQubitSimulator:
         return self.current_state
 
     def set_current_state(self, state: QuantumState):
-        """
-        Sets the simulator's current quantum state directly.
-        This is useful for continuing a simulation from a specific state,
-        e.g., passing the state from one step to the next in an RL environment.
-        It also clears the Qiskit circuit queue.
-        :param state: The QuantumState object to set as the current state.
-        """
         if not isinstance(state, QuantumState) or state.num_qubits != self.num_qubits:
             raise ValueError("Provided state is not a valid QuantumState object or has incorrect number of qubits.")
         self.current_state = state
@@ -151,52 +144,32 @@ class LogicalQubitSimulator:
 
 
     def get_final_measurements(self, num_shots: int = 1) -> dict:
-        """
-        Simulates measuring all qubits multiple times in the Z-basis from the current_state.
-        Uses Qiskit Aer's measurement capability on the current density matrix.
-        :param num_shots: Number of times to repeat the measurement.
-        :return: A dictionary of measurement outcomes (e.g., {'00': 50, '01': 25, ...}).
-        """
-        # Create a temporary Qiskit circuit just for measurements
-        # Ensure enough classical bits for all qubits to be measured
-        meas_qc = QuantumCircuit(self.num_qubits, self.num_qubits) # Qiskit automatically creates clbits here
+        meas_qc = QuantumCircuit(self.num_qubits, self.num_qubits) 
         meas_qc.measure(range(self.num_qubits), range(self.num_qubits))
 
-        # Transpile the measurement circuit
         transpiled_meas_qc = transpile(meas_qc, self.simulator)
 
-        # Run simulation starting from current_state density matrix
         job = self.simulator.run(transpiled_meas_qc, shots=num_shots, initial_state=self.current_state.get_density_matrix())
         result = job.result()
-        counts = result.get_counts(transpiled_meas_qc)
+        counts = result.get_counts(transpiled_qc) # Note: use transpiled_qc for counts, not meas_qc directly
         return counts
 
 # Example usage (for internal testing/understanding - will be in notebooks)
 if __name__ == "__main__":
     from qiskit_aer.noise import NoiseModel, depolarizing_error, ReadoutError 
     
-    # Create a simple Qiskit Aer noise model for testing
     noise_model_qiskit = NoiseModel()
-    
-    # Add a 1-qubit depolarizing error to all H and X gates
-    depol_error_1q = depolarizing_error(0.01, 1) # 1% depolarizing on 1-qubit gates
+    depol_error_1q = depolarizing_error(0.01, 1) 
     noise_model_qiskit.add_all_qubit_quantum_error(depol_error_1q, ['h', 'x'])
-
-    # Add a 2-qubit depolarizing error to CX gates
-    depol_error_2q = depolarizing_error(0.02, 2) # 2% depolarizing on 2-qubit gates
+    depol_error_2q = depolarizing_error(0.02, 2) 
     noise_model_qiskit.add_all_qubit_quantum_error(depol_error_2q, ['cx'])
-
-    # Add a basic readout error (e.g., 5% probability of error for each readout)
     readout_error = ReadoutError([[0.95, 0.05], [0.05, 0.95]])
     noise_model_qiskit.add_all_qubit_readout_error(readout_error)
 
     print("--- Simulating Bell State with Qiskit Aer NoiseModel ---")
     num_qubits_test = 2
     
-    # Initialize simulator with the Qiskit NoiseModel
     simulator = LogicalQubitSimulator(num_qubits_test, qiskit_noise_model=noise_model_qiskit)
-    
-    # Build a Bell state circuit
     simulator.add_gate('h', [0])
     simulator.add_gate('cx', [0], [1]) 
 
@@ -207,7 +180,6 @@ if __name__ == "__main__":
     fidelity = final_state.get_fidelity(ideal_bell_state_vector)
     print(f"Fidelity with ideal Bell state: {fidelity:.4f}")
 
-    # Get measurement counts (will reflect readout errors)
     counts = simulator.get_final_measurements(num_shots=1000)
     print(f"Measurement counts (1000 shots):\n{counts}")
 
